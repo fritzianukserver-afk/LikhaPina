@@ -127,3 +127,34 @@ it("bounds an unanswered access prompt and lets the user retry", async () => {
   await vi.advanceTimersByTimeAsync(60000);
   await pending;
 });
+it("bounds an unanswered network-details read and never asks Freighter to sign", async () => {
+  vi.useFakeTimers();
+  vi.mocked(getNetworkDetails).mockReturnValue(new Promise(() => {}));
+  const pending = expect(signPrepared(prepared, address)).rejects.toThrow(
+    "Freighter did not answer",
+  );
+  await vi.advanceTimersByTimeAsync(5000);
+  await pending;
+  expect(signTransaction).not.toHaveBeenCalled();
+});
+it("bounds an unanswered signing request and ignores its late response", async () => {
+  vi.useFakeTimers();
+  let resolveLate!: (value: {
+    signedTxXdr: string;
+    signerAddress: string;
+  }) => void;
+  vi.mocked(signTransaction).mockReturnValue(
+    new Promise((resolve) => {
+      resolveLate = resolve;
+    }),
+  );
+  const pending = expect(signPrepared(prepared, address)).rejects.toThrow(
+    "did not answer the signing request in time",
+  );
+  await vi.advanceTimersByTimeAsync(60000);
+  await pending;
+  // A response arriving after the deadline must not produce a signed envelope.
+  resolveLate({ signedTxXdr: "signed", signerAddress: address });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(signTransaction).toHaveBeenCalledTimes(1);
+});

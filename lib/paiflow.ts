@@ -4,6 +4,7 @@ import { StrKey } from "@stellar/stellar-sdk";
 import { AMOUNT, TESTNET } from "@/lib/types";
 import type { PublicConfig, Prepared } from "@/lib/types";
 import { envelopeHash } from "@/lib/transaction";
+import { collectTransactionEvents } from "@/lib/payment-evidence";
 export function configuration() {
   const token = process.env.PAIFLOW_API_TOKEN?.trim();
   const deploymentId = process.env.PAIFLOW_DEPLOYMENT_ID?.trim();
@@ -129,4 +130,15 @@ export async function paymentStatus(txHash: string) {
       "Transaction evidence mismatch; retain the original record.",
     );
   return data;
+}
+
+/** Read events from the configured deployment, scoped to the saved tx hash. */
+export async function paymentEvents(txHash: string) {
+  if (!/^[a-f0-9]{64}$/.test(txHash))
+    throw new Error("Invalid transaction hash.");
+  const d = deployment();
+  return collectTransactionEvents(txHash, async (query) => {
+    const { data } = await d.events.list(query);
+    return data;
+  });
 }

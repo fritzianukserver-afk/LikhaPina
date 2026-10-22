@@ -1,18 +1,27 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { Keypair } from "@stellar/stellar-sdk";
 import { StarterApp } from "@/components/starter-app";
 import { fixtureAddress, fixturePrepared } from "./transaction-fixture";
 import { envelopeHash } from "@/lib/transaction";
+import { NEW_DEMO_ORDER } from "@/lib/types";
+import { orderRecoveryKey } from "@/lib/recovery";
+import { legacyRecoveryKey } from "@/lib/recovery";
 import { connectWallet, signPrepared } from "@/lib/wallet";
 vi.mock("@/lib/wallet", () => ({
   connectWallet: vi.fn(),
   signPrepared: vi.fn(),
 }));
+// Deterministic test-only public account, different from the recorded consenting wallet.
+const otherAddress = Keypair.fromRawEd25519Seed(
+  Buffer.alloc(32, 8),
+).publicKey();
 const scope =
   "https://beta.app.paiflow.xyz/12345678-1234-1234-1234-123456789abc";
-const key = `paiflow-sdk-payment-v2:${scope}`;
+const key = orderRecoveryKey(scope, NEW_DEMO_ORDER.orderReference);
 const stored = {
-  version: 2,
+  version: 3,
+  orderReference: NEW_DEMO_ORDER.orderReference,
   scope,
   address: fixtureAddress,
   prepared: { ...fixturePrepared, txHash: envelopeHash(fixturePrepared.xdr) },
@@ -92,6 +101,17 @@ function button(label: string) {
 }
 function message() {
   return renderer!.root.findByProps({ role: "status" }).children.join("");
+}
+function flatten(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number")
+    return String(node);
+  if (Array.isArray(node)) return node.map(flatten).join(" ");
+  if (node && typeof node === "object" && "children" in node)
+    return flatten((node as { children: unknown }).children);
+  return "";
+}
+function appText() {
+  return flatten(renderer!.root.findByType("main").children);
 }
 async function click(label: string) {
   await act(async () => {
@@ -562,4 +582,133 @@ it("reload checks an earlier REJECTED response without treating it as final fail
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(action(vi.mocked(fetch).mock.calls[0]?.[1])).toBe("status");
   expect(saved().status).toBe("SUCCESS");
+});
+it("sign and check explain when no payment record exists instead of doing nothing", async () => {
+  await mount();
+  expect(button("Sign original transaction").props.disabled).toBe(true);
+  expect(button("Check original transaction").props.disabled).toBe(true);
+  await click("Check original transaction");
+  expect(message()).toContain("No saved payment record");
+  await click("Sign original transaction");
+  expect(message()).toContain("No saved payment record");
+  expect(fetch).not.toHaveBeenCalled();
+});
+it("sign stays disabled until the original consenting wallet is connected", async () => {
+  values.set(key, JSON.stringify({ ...stored, signedXdr: undefined }));
+  await mount();
+  expect(button("Sign original transaction").props.disabled).toBe(true);
+  vi.mocked(connectWallet).mockResolvedValue(otherAddress);
+  await click("Connect Freighter");
+  expect(button("Sign original transaction").props.disabled).toBe(true);
+  vi.mocked(connectWallet).mockResolvedValue(fixtureAddress);
+  await click("Connect Freighter");
+  expect(button("Sign original transaction").props.disabled).toBe(false);
+});
+it("sign explains instead of signing when a different wallet is connected", async () => {
+  values.set(key, JSON.stringify({ ...stored, signedXdr: undefined }));
+  await mount();
+  vi.mocked(connectWallet).mockResolvedValue(otherAddress);
+  await click("Connect Freighter");
+  await click("Sign original transaction");
+  expect(message()).toContain("Connect the original consenting wallet");
+  expect(signPrepared).not.toHaveBeenCalled();
+});
+it("sign explains when the exact signed envelope is already saved", async () => {
+  values.set(key, JSON.stringify(stored));
+  await mount();
+  expect(button("Sign original transaction").props.disabled).toBe(true);
+  await click("Sign original transaction");
+  expect(message()).toContain("Signed envelope already saved");
+  expect(saved().signedXdr).toBe(stored.signedXdr);
+  expect(fetch).not.toHaveBeenCalled();
+});
+it("sign explains when the original transaction is already final", async () => {
+  values.set(
+    key,
+    JSON.stringify({
+      ...stored,
+      signedXdr: undefined,
+      attempted: true,
+      status: "SUCCESS",
+    }),
+  );
+  await mount();
+  expect(button("Sign original transaction").props.disabled).toBe(true);
+  await click("Sign original transaction");
+  expect(message()).toContain("already final");
+  expect(saved().status).toBe("SUCCESS");
+  expect(fetch).not.toHaveBeenCalled();
+});
+it("shows visible guidance when no payment record is saved", async () => {
+  await mount();
+  const note = renderer!.root.findByProps({ role: "note" });
+  expect(note.children.join("")).toContain("No saved payment record");
+  expect(button("Sign original transaction").props.disabled).toBe(true);
+  expect(button("Check original transaction").props.disabled).toBe(true);
+});
+it("hides the missing-record guidance once a payment record exists", async () => {
+  values.set(key, JSON.stringify(stored));
+  await mount();
+  expect(renderer!.root.findAllByProps({ role: "note" })).toHaveLength(0);
+});
+it("a signing timeout keeps the unsigned preparation and never submits", async () => {
+  values.set(key, JSON.stringify({ ...stored, signedXdr: undefined }));
+  vi.mocked(connectWallet).mockResolvedValue(fixtureAddress);
+  vi.mocked(signPrepared).mockRejectedValue(
+    new Error(
+      "Freighter did not answer the signing request in time. Open the extension, finish or dismiss the pending request, then try again. The original payment record is kept.",
+    ),
+  );
+  await mount();
+  await click("Connect Freighter");
+  await click("Sign original transaction");
+  expect(message()).toContain("did not answer the signing request in time");
+  expect(saved().signedXdr).toBeUndefined();
+  expect(saved().attempted).toBeUndefined();
+  expect(saved().prepared.txHash).toBe(stored.prepared.txHash);
+  expect(fetch).toHaveBeenCalledTimes(1); // integration readiness only, no payment action
+});
+it("shows the new order as not started and preserves a same-scope legacy record without reading it", async () => {
+  const oldKey = legacyRecoveryKey(scope);
+  const legacyRaw = "legacy-recovery-fixture-preserved-byte-for-byte";
+  values.set(oldKey, legacyRaw);
+  const getItem = vi.spyOn(localStorage, "getItem");
+
+  await mount();
+
+  expect(appText()).toContain("New simulated order");
+  expect(appText()).toContain(NEW_DEMO_ORDER.orderReference);
+  expect(appText()).toContain("Transaction status Not started");
+  expect(appText().replace(/\s+/g, " ")).toContain(
+    "Legacy order — LP-DEMO-0001",
+  );
+  expect(getItem).not.toHaveBeenCalledWith(oldKey);
+  expect(values.get(oldKey)).toBe(legacyRaw);
+  expect(values.has(key)).toBe(false);
+  expect(connectWallet).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it("keeps transaction SUCCESS separate from complete but unverified event evidence", async () => {
+  values.set(key, JSON.stringify({ ...stored, status: "SUCCESS" }));
+  vi.mocked(fetch).mockImplementation(async (_url, options) => {
+    expect(action(options)).toBe("events");
+    return Response.json({
+      data: {
+        txHash: stored.prepared.txHash,
+        events: [],
+        pagesRead: 1,
+        duplicateCount: 0,
+        invalidEventCount: 0,
+        complete: true,
+      },
+    });
+  });
+  await mount();
+  expect(appText()).toContain("Transaction status SUCCESS");
+  await click("Read original transaction events");
+  expect(appText()).toMatch(/Evidence state:\s+UNVERIFIED SPLIT/);
+  expect(appText()).toContain("VERIFIED PAYOUTS");
+  expect(appText()).toContain("conclusion is available");
+  expect(renderer!.root.findAllByProps({ "data-testid": "payment-receipt" })).toHaveLength(1);
 });

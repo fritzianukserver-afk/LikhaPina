@@ -1,6 +1,18 @@
 # LikhaPiña PayProof demo
 
-This starter is currently skinned as **LikhaPiña PayProof**, a hackathon demo of a blockchain-verifiable payment for the LikhaPiña Aklan piña B2B sourcing platform. The home screen shows one clearly labelled demo order (`LP-DEMO-0001`, Sample Aklan Piña Textile Order) for a fixed **1 testnet XLM**, payable through the unchanged prepare → sign → submit → verify flow above. No real buyer, producer, goods or money participate. The receipt section and its Stellar Testnet explorer link appear only after the original transaction reaches verified `SUCCESS`; pending, unknown, missing or expired transactions are never labelled confirmed.
+This starter is currently skinned as **LikhaPiña PayProof**, a hackathon demo of a blockchain-verifiable payment for the LikhaPiña Aklan piña B2B sourcing platform. The home screen keeps the original demo order (`LP-DEMO-0001`, Sample Aklan Piña Textile Order) separate from a new simulated order (`LP-DEMO-0002`, Aklan Piña Weaver Cooperative Sample Order). The new order is fixed at **1 testnet XLM** and displays an expected 90/10 split as demo metadata. No real buyer, producer, goods or money participate. The new order uses its own order-scoped recovery key; the existing v2 recovery key remains unchanged and is not migrated or overwritten.
+
+Transaction `SUCCESS` confirms only the original transaction. The order has a separate, read-only **Read original transaction events** action that queries the configured Paiflow deployment by the saved original hash, follows event cursors, and deduplicates by `eventId`. The UI reports pagination completeness separately from transaction status. Delayed, missing, invalid, or truncated events do not prove failure.
+
+Paiflow documents generic event identity, kind, ledger, hash and an opaque `data` payload, but does not document general payout payload fields for recipient address and amount. The app does not interpret that payload or infer a split from expected 90/10 metadata. It therefore keeps payout evidence `UNVERIFIED SPLIT` (or `INCOMPLETE EVIDENCE`) and never reports `VERIFIED PAYOUTS` or `PAID_AND_VERIFIED`. Exact recipient addresses, amounts, asset and complete payout evidence require an authoritative documented source before such a verifier can be implemented.
+
+## LikhaPiña sourcing and production demo
+
+The main route (`/`) now presents the existing LikhaPiña brand and the buyer and producer demo journeys. Buyer routes cover textile and producer browsing, fictional producer profiles, sourcing requests, quotations, simulated orders and tracking. Producer routes cover incoming requests, sample quotation submission, accepted orders and simulated production milestones. The demo seeds one request and one pending quotation so the buyer flow can be shown immediately.
+
+Run with `pnpm dev` and open `http://localhost:3000`. Use **Buyer workspace** and **Producer workspace** to switch views. Accept the sample quotation to create an order, or create a new request and respond to it in the producer view. Demo state is stored separately under `likhapina.next-demo.v1`; it does not read, migrate or write the prototype’s former storage keys or the PayProof recovery keys. Records are fictional, local to this browser and not authenticated or synchronized.
+
+The original payment walkthrough is available at `/payproof`. The sourcing demo does not call Freighter, Paiflow APIs, or payment routes. Its quotation, order and production statuses are simulated and are not PayProof transaction or payout evidence. The original HTML/CSS/JavaScript prototype remains unchanged at `C:\Users\frinc\projects\LikhaPina - prototype`.
 
 The Paiflow API never exposes recipient addresses. To display your configured recipient on the order panel, set these optional, non-secret, server-only display values in `.env.local`:
 
@@ -85,12 +97,20 @@ An unresolved payment record for another platform or deployment blocks a new pay
 
 | File                           | Responsibility                                                 |
 | ------------------------------ | -------------------------------------------------------------- |
+| `app/page.tsx`                 | LikhaPiña landing page                                         |
+| `app/(market)/buyer/`          | Buyer discovery and sourcing journey                           |
+| `app/(market)/producer/`       | Producer response and production journey                       |
+| `components/demo-views.tsx`    | Shared market cards, forms, quotes, orders and progress UI      |
+| `components/demo-store.tsx`    | Fictional shared demo state in an isolated browser key         |
+| `lib/demo-data.ts`             | Sample textiles, fictional makers and seed records             |
+| `app/payproof/page.tsx`        | Preserved PayProof starter route                               |
 | `lib/paiflow.ts`               | Server-only configuration and typed SDK payment calls          |
-| `app/api/pay/route.ts`         | Allowlisted preparation, submission and reconciliation actions |
+| `app/api/pay/route.ts`         | Allowlisted preparation, submission, status and read-only event actions |
 | `app/api/integration/route.ts` | Non-secret configuration state                                 |
 | `lib/wallet.ts`                | Freighter connection and signing                               |
 | `lib/recovery.ts`              | Original transaction evidence and validation                   |
 | `lib/transaction.ts`           | Transaction hashing and unchanged-envelope checks              |
+| `lib/payment-evidence.ts`      | Bounded transaction-correlated event collection and validation  |
 | `components/starter-app.tsx`   | Payment walkthrough and recovery controls                      |
 
 The SDK supplies transport, typed responses and API metadata. Your app supplies wallet consent, storage, authorization, reconciliation decisions and business rules.

@@ -6,7 +6,13 @@ import {
   Operation,
   FeeBumpTransaction,
 } from "@stellar/stellar-sdk";
-import { assertNoConflictingRecovery } from "@/lib/recovery";
+import {
+  assertNoConflictingRecovery,
+  legacyRecoveryKey,
+  orderRecoveryKey,
+  readOrderRecovery,
+  saveOrderRecovery,
+} from "@/lib/recovery";
 import { POST } from "@/app/api/pay/route";
 import { beforeEach, expect, it, vi } from "vitest";
 import {
@@ -17,6 +23,8 @@ import {
 import { envelopeHash, assertOriginal } from "@/lib/transaction";
 import { readRecovery, saveRecovery, terminal } from "@/lib/recovery";
 import type { Recovery } from "@/lib/recovery";
+import type { OrderRecovery } from "@/lib/recovery";
+import { NEW_DEMO_ORDER } from "@/lib/types";
 import {
   configuration,
   publicConfig,
@@ -32,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   prepare: vi.fn(),
   submit: vi.fn(),
   status: vi.fn(),
+  events: vi.fn(),
   constructor: vi.fn(),
 }));
 vi.mock("@paiflow/sdk", async (importOriginal) => {
@@ -47,6 +56,7 @@ vi.mock("@paiflow/sdk", async (importOriginal) => {
           capabilities: { get: mocks.get },
           execute: { prepare: mocks.prepare, submit: mocks.submit },
           transactions: { get: mocks.status },
+          events: { list: mocks.events },
         };
       }
     },
@@ -81,6 +91,9 @@ beforeEach(() => {
   mocks.submit.mockResolvedValue({ data: { txHash: hash, status: "PENDING" } });
   mocks.status.mockResolvedValue({
     data: { txHash: hash, status: "UNKNOWN", network: "testnet" },
+  });
+  mocks.events.mockResolvedValue({
+    data: { items: [], nextCursor: null, hasMore: false },
   });
 });
 it("accepts either token family while public config never contains credentials", () => {
@@ -140,6 +153,35 @@ it("does not treat hash mismatch or UNKNOWN as replacement permission", async ()
     data: { txHash: "b".repeat(64), status: "SUCCESS", network: "testnet" },
   });
   await expect(paymentStatus(hash)).rejects.toThrow("evidence mismatch");
+});
+it("reads events only from the configured deployment and original hash", async () => {
+  const { paymentEvents } = await import("@/lib/paiflow");
+  const evidence = await paymentEvents(hash);
+  expect(evidence).toMatchObject({ txHash: hash, complete: true, events: [] });
+  expect(mocks.events).toHaveBeenCalledExactlyOnceWith({ txHash: hash, limit: 100 });
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.submit).not.toHaveBeenCalled();
+});
+it("exposes an events-only route action without invoking payment mutations", async () => {
+  const response = await POST(
+    new Request("https://starter.example/api/pay", {
+      method: "POST",
+      headers: {
+        origin: "https://starter.example",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ action: "events", txHash: hash }),
+    }),
+  );
+  expect(response.status).toBe(200);
+  expect((await response.json()).data).toMatchObject({
+    txHash: hash,
+    complete: true,
+    events: [],
+  });
+  expect(mocks.events).toHaveBeenCalledWith({ txHash: hash, limit: 100 });
+  expect(mocks.prepare).not.toHaveBeenCalled();
+  expect(mocks.submit).not.toHaveBeenCalled();
 });
 it("restores original signed envelope after reload and rejects changed evidence", () => {
   const values = new Map<string, string>();
@@ -219,6 +261,33 @@ it("blocks legacy and other-scope recovery while retaining every stored record",
     expect(() => assertNoConflictingRecovery(store, "current")).toThrow();
     expect(store.getItem()).toBe("retained");
   }
+});
+it("gives the new order its own key and leaves the legacy record fixture untouched", () => {
+  const oldKey = legacyRecoveryKey(record.scope);
+  const newKey = orderRecoveryKey(record.scope, NEW_DEMO_ORDER.orderReference);
+  const legacyRaw = JSON.stringify(record);
+  const values = new Map([[oldKey, legacyRaw]]);
+  const storage = {
+    get length() {
+      return values.size;
+    },
+    key: (index: number) => [...values.keys()][index] ?? null,
+    getItem: vi.fn((key: string) => values.get(key) ?? null),
+    setItem: (key: string, value: string) => values.set(key, value),
+  };
+  expect(newKey).not.toBe(oldKey);
+  assertNoConflictingRecovery(storage, newKey, record.scope);
+  expect(storage.getItem).not.toHaveBeenCalledWith(oldKey);
+
+  const orderRecord: OrderRecovery = {
+    ...record,
+    version: 3,
+    orderReference: NEW_DEMO_ORDER.orderReference,
+  };
+  saveOrderRecovery(storage, newKey, orderRecord);
+  expect(values.get(oldKey)).toBe(legacyRaw);
+  expect(readOrderRecovery(record.scope, NEW_DEMO_ORDER.orderReference, values.get(newKey)!))
+    .toEqual(orderRecord);
 });
 it("route refuses unknown fields, bad origin, oversized and malformed requests before SDK mutation", async () => {
   for (const [body, origin] of [

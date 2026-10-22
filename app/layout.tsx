@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./likhapina.css";
 export const metadata: Metadata = {
-  title: "LikhaPiña PayProof",
+  title: "LikhaPiña · Source. Create. Connect.",
   description:
-    "Hackathon demo: blockchain-verifiable 1 XLM testnet payment for a simulated LikhaPiña Aklan piña order",
+    "A fictional Aklan piña textile sourcing and production coordination demo.",
 };
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (

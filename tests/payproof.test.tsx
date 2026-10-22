@@ -5,13 +5,14 @@ import {
   configuration,
   publicConfig,
 } from "@/lib/paiflow";
-import { AMOUNT, ORDER_REFERENCE, PRODUCT_NAME } from "@/lib/types";
+import { AMOUNT, NEW_DEMO_ORDER, ORDER_REFERENCE } from "@/lib/types";
 import type { PublicConfig } from "@/lib/types";
 import { fromStroops } from "@/lib/amount";
 import { fixtureAddress, fixturePrepared } from "./transaction-fixture";
 import { envelopeHash } from "@/lib/transaction";
 import { connectWallet } from "@/lib/wallet";
-import type { Recovery } from "@/lib/recovery";
+import { orderRecoveryKey } from "@/lib/recovery";
+import type { OrderRecovery } from "@/lib/recovery";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/wallet", () => ({
@@ -21,10 +22,11 @@ vi.mock("@/lib/wallet", () => ({
 
 const id = "12345678-1234-1234-1234-123456789abc";
 const scope = `https://beta.app.paiflow.xyz/${id}`;
-const key = `paiflow-sdk-payment-v2:${scope}`;
+const key = orderRecoveryKey(scope, NEW_DEMO_ORDER.orderReference);
 const txHash = envelopeHash(fixturePrepared.xdr);
-const stored: Recovery = {
-  version: 2,
+const stored: OrderRecovery = {
+  version: 3,
+  orderReference: NEW_DEMO_ORDER.orderReference,
   scope,
   address: fixtureAddress,
   prepared: { ...fixturePrepared, txHash },
@@ -95,7 +97,9 @@ function text() {
 }
 it("labels the demo order clearly and fixes 1 XLM in stroops", () => {
   expect(ORDER_REFERENCE).toMatch(/^LP-DEMO-/);
-  expect(PRODUCT_NAME).toContain("Piña");
+  expect(NEW_DEMO_ORDER.orderReference).not.toBe(ORDER_REFERENCE);
+  expect(NEW_DEMO_ORDER.productName).toContain("Piña");
+  expect(NEW_DEMO_ORDER.expectedSplitBps).toEqual({ weavers: 9000, platform: 1000 });
   expect(fromStroops(AMOUNT)).toBe("1");
   expect(AMOUNT).toBe("10000000");
 });
@@ -121,7 +125,8 @@ it("shows the demo order, safe recipient display and no receipt before any verif
   const body = text();
   expect(body).toContain("LikhaPiña PayProof");
   expect(body).toContain(ORDER_REFERENCE);
-  expect(body).toContain(PRODUCT_NAME);
+  expect(body).toContain(NEW_DEMO_ORDER.productName);
+  expect(body).toContain("90% weavers / 10% platform");
   expect(body).toContain("HACKATHON DEMO");
   expect(body).toContain("not a real order");
   expect(body).toContain("the API never exposes recipient addresses");

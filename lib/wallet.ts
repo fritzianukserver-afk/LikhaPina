@@ -44,14 +44,22 @@ export async function signPrepared(prepared: Prepared, address: string) {
     throw new Error(
       "Wallet changed. Reconnect the original wallet and retain this payment record.",
     );
-  const network = await getNetworkDetails();
+  const network = await bounded(
+    getNetworkDetails(),
+    5000,
+    "Freighter did not answer. Open the extension and try again.",
+  );
   if (network.error) throw new Error(network.error.message);
   if (network.networkPassphrase !== prepared.networkPassphrase)
     throw new Error("Switch Freighter to Testnet before signing.");
-  const signed = await signTransaction(prepared.xdr, {
-    networkPassphrase: prepared.networkPassphrase,
-    address,
-  });
+  const signed = await bounded(
+    signTransaction(prepared.xdr, {
+      networkPassphrase: prepared.networkPassphrase,
+      address,
+    }),
+    60000,
+    "Freighter did not answer the signing request in time. Open the extension, finish or dismiss the pending request, then try again. The original payment record is kept.",
+  );
   if (signed.error) throw new Error(signed.error.message);
   if (!signed.signedTxXdr)
     throw new Error("Freighter did not return a signed transaction.");

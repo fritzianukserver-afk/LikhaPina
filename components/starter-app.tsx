@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import type { PublicConfig, Prepared, Result } from "@/lib/types";
-import { AMOUNT, ORDER_REFERENCE, PRODUCT_NAME } from "@/lib/types";
+import { NEW_DEMO_ORDER, ORDER_REFERENCE } from "@/lib/types";
 import { fromStroops } from "@/lib/amount";
 import {
   BrowserRequestError,
@@ -17,28 +17,35 @@ import {
 import { connectWallet, signPrepared } from "@/lib/wallet";
 import { assertOriginal } from "@/lib/transaction";
 import {
-  readRecovery,
-  saveRecovery,
+  readOrderRecovery,
+  saveOrderRecovery,
   terminal,
   assertNoConflictingRecovery,
+  orderRecoveryKey,
 } from "@/lib/recovery";
-import type { Recovery } from "@/lib/recovery";
+import type { OrderRecovery } from "@/lib/recovery";
+import type { EventEvidence } from "@/lib/payment-evidence";
 
 type Operation = {
   signal: AbortSignal;
   valid: () => boolean;
-  save: (record: Recovery) => void;
+  save: (record: OrderRecovery) => void;
   message: (message: string) => void;
 };
 
 export function StarterApp({ config }: { config: PublicConfig }) {
   const [address, setAddress] = useState("");
-  const [record, setRecord] = useState<Recovery | null>(null);
+  const [record, setRecord] = useState<OrderRecovery | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [message, setMessage] = useState("");
+  const [eventEvidence, setEventEvidence] = useState<EventEvidence | null>(null);
+  const [eventPending, setEventPending] = useState(false);
+  const [eventUnavailable, setEventUnavailable] = useState(false);
   const [blocked, setBlocked] = useState(true);
-  const key = config.ready ? `paiflow-sdk-payment-v2:${config.scope}` : "";
+  const key = config.ready
+    ? orderRecoveryKey(config.scope, NEW_DEMO_ORDER.orderReference)
+    : "";
   const scopeKey = useRef(key);
   scopeKey.current = key;
   const loadedKey = useRef<string | null>(null);
@@ -55,11 +62,21 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     setRecord(null);
     setAddress("");
     setMessage("");
+    setEventEvidence(null);
+    setEventPending(false);
+    setEventUnavailable(false);
     if (!config.ready) return;
     try {
-      assertNoConflictingRecovery(localStorage, key);
+      assertNoConflictingRecovery(localStorage, key, config.scope);
       const raw = localStorage.getItem(key);
-      if (raw) setRecord(readRecovery(config.scope, raw));
+      if (raw)
+        setRecord(
+          readOrderRecovery(
+            config.scope,
+            NEW_DEMO_ORDER.orderReference,
+            raw,
+          ),
+        );
       loadedKey.current = key;
       setBlocked(false);
     } catch (error) {
@@ -76,7 +93,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
   }, [key, config.ready]);
 
   async function run(
-    action: (current: Recovery | null, op: Operation) => Promise<void>,
+    action: (current: OrderRecovery | null, op: Operation) => Promise<void>,
   ) {
     if (!config.ready || active.current || blocked || loadedKey.current !== key)
       return;
@@ -96,7 +113,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
           throw new Error(
             "Recovery scope mismatch. Retain the original record.",
           );
-        saveRecovery(localStorage, key, r);
+        saveOrderRecovery(localStorage, key, r);
         setRecord(r);
       },
       message: (text) => {
@@ -119,9 +136,15 @@ export function StarterApp({ config }: { config: PublicConfig }) {
             throw new Error(
               "Another tab is handling this deployment's payment. Return to that tab.",
             );
-          assertNoConflictingRecovery(localStorage, key);
+          assertNoConflictingRecovery(localStorage, key, config.scope);
           const raw = localStorage.getItem(key);
-          const current = raw ? readRecovery(config.scope, raw) : null;
+          const current = raw
+            ? readOrderRecovery(
+                config.scope,
+                NEW_DEMO_ORDER.orderReference,
+                raw,
+              )
+            : null;
           setRecord(current);
           await action(current, op);
         },
@@ -150,7 +173,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
       return "Original transaction failed on the network. Its evidence is retained until acknowledged.";
     return `Original transaction: ${result.status}. UNKNOWN, rejection, expiry or missing history never prove replacement is safe.`;
   }
-  async function checkOriginal(current: Recovery, op: Operation) {
+  async function checkOriginal(current: OrderRecovery, op: Operation) {
     if (!op.valid()) return;
     resumed.current.add(`${key}:${current.prepared.txHash}`);
     op.message(CONFIRMATION_PENDING);
@@ -195,7 +218,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     });
   }, [key, blocked, busy, record]);
 
-  async function prepare(current: Recovery | null, op: Operation) {
+  async function prepare(current: OrderRecovery | null, op: Operation) {
     if (current)
       throw new Error("Resolve the existing payment before preparing another.");
     if (!address) throw new Error("Connect Freighter first.");
@@ -205,13 +228,36 @@ export function StarterApp({ config }: { config: PublicConfig }) {
       op.signal,
     );
     if (!config.ready) return;
-    op.save({ version: 2, scope: config.scope, address, prepared });
+    op.save({
+      version: 3,
+      orderReference: NEW_DEMO_ORDER.orderReference,
+      scope: config.scope,
+      address,
+      prepared,
+    });
     op.message(
       "Prepared and saved. Review the wallet transaction before approving.",
     );
   }
-  async function sign(current: Recovery | null, op: Operation) {
-    if (!current || current.signedXdr || terminal(current)) return;
+  async function sign(current: OrderRecovery | null, op: Operation) {
+    if (!current) {
+      op.message(
+        "No saved payment record in this browser. Prepare a payment first.",
+      );
+      return;
+    }
+    if (current.signedXdr) {
+      op.message(
+        "Signed envelope already saved. Submit it or check its status.",
+      );
+      return;
+    }
+    if (terminal(current)) {
+      op.message(
+        "This transaction is already final. Acknowledge the final result and clear before starting another payment.",
+      );
+      return;
+    }
     if (address !== current.address)
       throw new Error("Connect the original consenting wallet.");
     const next = { ...current, signing: true };
@@ -221,7 +267,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     op.save({ ...next, signing: false, signedXdr });
     op.message("Exact signed envelope saved. Submit when ready.");
   }
-  async function submit(current: Recovery | null, op: Operation) {
+  async function submit(current: OrderRecovery | null, op: Operation) {
     if (!current?.signedXdr || terminal(current)) return;
     assertOriginal(
       current.prepared.xdr,
@@ -265,8 +311,13 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     // Confirmation uses the original status route even when submission reports success.
     await checkOriginal(next, op);
   }
-  async function status(current: Recovery | null, op: Operation) {
-    if (!current) return;
+  async function status(current: OrderRecovery | null, op: Operation) {
+    if (!current) {
+      op.message(
+        "No saved payment record in this browser. Prepare a payment first.",
+      );
+      return;
+    }
     const result = await browserRequest<Result>(
       "/api/pay",
       { action: "status", txHash: current.prepared.txHash },
@@ -278,7 +329,38 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     op.save({ ...current, status: result.status });
     op.message(statusMessage(result));
   }
-  async function clear(current: Recovery | null, op: Operation) {
+  async function checkEvents(current: OrderRecovery | null, op: Operation) {
+    if (!current) {
+      op.message("No saved payment record in this browser.");
+      return;
+    }
+    setEventPending(true);
+    setEventUnavailable(false);
+    setEventEvidence(null);
+    try {
+      const result = await browserRequest<EventEvidence>(
+        "/api/pay",
+        { action: "events", txHash: current.prepared.txHash },
+        op.signal,
+        RESPONSE_DEADLINE_MS,
+      );
+      if (!op.valid()) return;
+      if (result.txHash !== current.prepared.txHash)
+        throw new Error("Event evidence hash mismatch. Retain the original record.");
+      setEventEvidence(result);
+      op.message(
+        result.complete
+          ? "Event collection reached its current end. Payouts remain unverified because Paiflow does not document recipient and amount fields for general payout events."
+          : "Event collection is incomplete. Retain the original record and check again later.",
+      );
+    } catch (error) {
+      if (op.valid()) setEventUnavailable(true);
+      throw error;
+    } finally {
+      if (op.valid()) setEventPending(false);
+    }
+  }
+  async function clear(current: OrderRecovery | null, op: Operation) {
     if (!current || !terminal(current))
       throw new Error(
         "Check final SUCCESS or FAILED before clearing this record.",
@@ -303,22 +385,34 @@ export function StarterApp({ config }: { config: PublicConfig }) {
       </header>
       <p>
         A blockchain-verifiable payment demo for the LikhaPiña Aklan piña B2B
-        sourcing platform. It pays a fixed {fromStroops(AMOUNT)} testnet XLM for
-        one simulated order using the server-side Paiflow SDK and Freighter
-        signing. No real buyer, producer, goods or money participate; nothing is
-        fulfilled.
+        sourcing platform. The new simulated order below is fixed at 1 XLM on
+        Stellar Testnet. No real buyer, producer, goods or money participate;
+        nothing is fulfilled.
       </p>
+      <section data-testid="legacy-order" aria-label="Legacy order recovery">
+        <h2>Legacy order — {ORDER_REFERENCE}</h2>
+        <p>
+          The earlier order keeps its original v2 recovery key. This new order
+          does not load, migrate, relabel, or overwrite that recovery record.
+          Keep its transaction evidence separate while reconciling it.
+        </p>
+      </section>
       <section aria-label="Demo order summary">
-        <h2>Demo order</h2>
+        <h2>New simulated order</h2>
         <dl>
           <dt>Product</dt>
-          <dd>{PRODUCT_NAME}</dd>
+          <dd>{NEW_DEMO_ORDER.productName}</dd>
           <dt>Order reference</dt>
           <dd>
-            <code>{ORDER_REFERENCE}</code> (demo reference, not a real order)
+            <code>{NEW_DEMO_ORDER.orderReference}</code> (demo reference, not a real order)
           </dd>
           <dt>Payment amount</dt>
-          <dd>{fromStroops(AMOUNT)} XLM — Stellar Testnet only</dd>
+          <dd>{fromStroops(NEW_DEMO_ORDER.amount)} XLM — Stellar Testnet only</dd>
+          <dt>Expected payout split</dt>
+          <dd>
+            90% weavers / 10% platform (display metadata only; not verified
+            against Paiflow deployment rules or transaction payouts)
+          </dd>
           <dt>Recipient</dt>
           <dd>
             {config.ready &&
@@ -347,7 +441,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
               "Unavailable until the server is configured."
             )}
           </dd>
-          <dt>Payment status</dt>
+          <dt>Transaction status</dt>
           <dd>{record?.status ?? "Not started"}</dd>
         </dl>
       </section>
@@ -390,7 +484,13 @@ export function StarterApp({ config }: { config: PublicConfig }) {
         <h2>2. Sign and submit</h2>
         <button
           disabled={
-            busy || !record || !!record.signedXdr || terminal(record) || blocked
+            busy ||
+            !record ||
+            !address ||
+            (record !== null && address !== record.address) ||
+            !!record.signedXdr ||
+            terminal(record) ||
+            blocked
           }
           onClick={() => run(sign)}
         >
@@ -417,6 +517,13 @@ export function StarterApp({ config }: { config: PublicConfig }) {
           this browser's storage until the original transaction is resolved.
           Re-signing uses the same body; it never prepares a replacement.
         </p>
+        {config.ready && !blocked && !record && (
+          <p role="note">
+            No saved payment record in this browser yet. The check and recovery
+            controls below stay inactive until you prepare the payment above;
+            nothing is created, signed or submitted automatically.
+          </p>
+        )}
         {record && (
           <>
             <p>
@@ -426,12 +533,53 @@ export function StarterApp({ config }: { config: PublicConfig }) {
             <p>Status: {record.status || "Not checked"}</p>
           </>
         )}
+        <section data-testid="payout-evidence" aria-label="Payout evidence">
+          <h3>Payout evidence</h3>
+          <p>
+            Evidence state: {eventPending
+              ? "PENDING"
+              : !eventEvidence
+                ? eventUnavailable
+                  ? "INCOMPLETE EVIDENCE"
+                  : "NOT CHECKED"
+                : eventEvidence.complete
+                  ? "UNVERIFIED SPLIT"
+                  : "INCOMPLETE EVIDENCE"}
+          </p>
+          <p>
+            Transaction status and event collection are separate. Event payloads
+            are not interpreted as payouts; current documented fields do not prove
+            both recipient addresses or exact amounts. No `VERIFIED PAYOUTS`
+            conclusion is available.
+          </p>
+          {eventEvidence && (
+            <>
+              <p>
+                Collection: {eventEvidence.complete ? "complete page set" : "incomplete"};{" "}
+                {eventEvidence.events.length} unique events across {eventEvidence.pagesRead} page(s).
+                {eventEvidence.duplicateCount > 0
+                  ? ` ${eventEvidence.duplicateCount} duplicate event(s) omitted.`
+                  : ""}
+                {eventEvidence.invalidEventCount > 0
+                  ? ` ${eventEvidence.invalidEventCount} invalid or mismatched event(s) excluded.`
+                  : ""}
+              </p>
+              {eventEvidence.events.map((event) => (
+                <p key={event.eventId}>
+                  {event.kind} · ledger {event.ledger} · {event.occurredAt} · tx{" "}
+                  <code>{event.txHash}</code>
+                </p>
+              ))}
+            </>
+          )}
+        </section>
         {record?.status === "SUCCESS" && (
           <section data-testid="payment-receipt" aria-label="Payment receipt">
             <h3>Payment receipt</h3>
             <p>
-              {PRODUCT_NAME} (<code>{ORDER_REFERENCE}</code>):{" "}
-              {fromStroops(AMOUNT)} XLM paid on Stellar Testnet by the
+              {NEW_DEMO_ORDER.productName} (
+              <code>{NEW_DEMO_ORDER.orderReference}</code>):{" "}
+              {fromStroops(NEW_DEMO_ORDER.amount)} XLM paid on Stellar Testnet by the
               connected demo wallet.
             </p>
             <p>
@@ -449,8 +597,8 @@ export function StarterApp({ config }: { config: PublicConfig }) {
             </p>
             <p>
               This receipt appears only after the original transaction reached
-              SUCCESS on testnet. It does not verify downstream payouts or
-              fulfil an application order.
+              SUCCESS on testnet. It does not verify the expected 90/10 split,
+              downstream payouts, or fulfil an application order.
             </p>
           </section>
         )}
@@ -461,15 +609,21 @@ export function StarterApp({ config }: { config: PublicConfig }) {
           Check original transaction
         </button>{" "}
         <button
+          disabled={busy || !record || blocked}
+          onClick={() => run(checkEvents)}
+        >
+          Read original transaction events
+        </button>{" "}
+        <button
           disabled={busy || !record || !terminal(record) || blocked}
           onClick={() => run(clear)}
         >
           Acknowledge final result and clear
         </button>
         <p>
-          Inspect the deployment's activity and recipient balances separately to
-          verify your intended payment and payout rules. Transaction
-          confirmation alone is not application payment verification.
+          Deployment activity and balances may provide separate context, but this
+          app cannot use them to prove transaction-specific recipient payouts.
+          Transaction confirmation alone is not application payment verification.
         </p>
       </section>
       <p role="status" aria-live="polite">

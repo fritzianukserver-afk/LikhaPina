@@ -1,4 +1,9 @@
-import { preparePayment, submitPayment, paymentStatus } from "@/lib/paiflow";
+import {
+  preparePayment,
+  submitPayment,
+  paymentStatus,
+  paymentEvents,
+} from "@/lib/paiflow";
 import { handle, sameOrigin } from "@/lib/http";
 export async function POST(request: Request) {
   return handle(async () => {
@@ -21,6 +26,12 @@ export async function POST(request: Request) {
       Object.keys(v).length === 2
     )
       return paymentStatus(v.txHash);
+    if (
+      v.action === "events" &&
+      typeof v.txHash === "string" &&
+      Object.keys(v).length === 2
+    )
+      return paymentEvents(v.txHash);
     if (
       v.action === "submit" &&
       typeof v.signedXdr === "string" &&
