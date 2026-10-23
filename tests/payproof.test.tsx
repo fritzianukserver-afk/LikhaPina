@@ -90,6 +90,8 @@ function flatten(node: unknown): string {
   if (Array.isArray(node)) return node.map(flatten).join(" ");
   if (node && typeof node === "object" && "children" in node)
     return flatten((node as { children: unknown }).children);
+  if (node && typeof node === "object" && "props" in node)
+    return flatten((node as { props: { children?: unknown } }).props.children);
   return "";
 }
 function text() {
@@ -120,7 +122,7 @@ it("serves optional recipient display settings without ever exposing credentials
   expect(cleaned.recipientLabel).toBeUndefined();
   expect(configuration().token).toBe("pfd_" + "a".repeat(64));
 });
-it("shows the demo order, safe recipient display and no receipt before any verified payment", async () => {
+it("shows the demo order, safe recipient display and no confirmation before transaction SUCCESS", async () => {
   await mount();
   const body = text();
   expect(body).toContain("LikhaPiña PayProof");
@@ -190,6 +192,11 @@ it("receipt shows hash and testnet explorer link only on SUCCESS status", async 
     `https://stellar.expert/explorer/testnet/tx/${txHash}`,
   );
   expect(links.some((h) => h.includes("mainnet"))).toBe(false);
+  const receiptText = flatten(receipts[0]!.props.children).replace(/\s+/g, " ").trim();
+  expect(receiptText).toContain("Paiflow reported the original 1 XLM transaction");
+  expect(receiptText).toContain("does not prove that the expected 90/10 split");
+  expect(receiptText).not.toContain("XLM paid");
+  expect(receiptText).not.toContain("Verified transaction:");
 });
 it("unconfigured server disables initiation and shows the setup message", async () => {
   vi.stubEnv("PAIFLOW_API_TOKEN", "");

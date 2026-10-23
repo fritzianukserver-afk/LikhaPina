@@ -100,7 +100,11 @@ function button(label: string) {
     .find((b) => b.children.join("") === label)!;
 }
 function message() {
-  return renderer!.root.findByProps({ role: "status" }).children.join("");
+  const feedback = [
+    ...renderer!.root.findAllByProps({ role: "status" }),
+    ...renderer!.root.findAllByProps({ role: "alert" }),
+  ].find((node) => node.props["data-testid"] === "payproof-feedback");
+  return feedback?.children.join("") ?? "";
 }
 function flatten(node: unknown): string {
   if (typeof node === "string" || typeof node === "number")
@@ -123,6 +127,28 @@ async function tick(ms: number) {
     await vi.advanceTimersByTimeAsync(ms);
   });
 }
+it("shows action-specific Freighter connection progress and success feedback", async () => {
+  let resolveWallet!: (address: string) => void;
+  vi.mocked(connectWallet).mockReturnValue(
+    new Promise((resolve) => { resolveWallet = resolve; }),
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ data: { ready: true } })),
+  );
+  await mount();
+  await click("Connect Freighter");
+  expect(appText()).toContain("Checking integration and waiting for Freighter access");
+  await act(async () => {
+    resolveWallet(fixtureAddress);
+    await Promise.resolve();
+  });
+  await tick(0);
+  expect(message()).toContain("Freighter connected. Selected public address is shown below.");
+  expect(appText()).toContain(fixtureAddress);
+  expect(appText()).toContain("Connected to Freighter");
+});
+
 it("submit RPC timeout keeps exact signed evidence, checks UNKNOWN then SUCCESS, and never automatically resubmits or prepares", async () => {
   values.set(key, JSON.stringify(stored));
   let checks = 0;

@@ -39,6 +39,8 @@ export function StarterApp({ config }: { config: PublicConfig }) {
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [message, setMessage] = useState("");
+  const [progressMessage, setProgressMessage] = useState("");
+  const [feedbackType, setFeedbackType] = useState<"status" | "error">("status");
   const [eventEvidence, setEventEvidence] = useState<EventEvidence | null>(null);
   const [eventPending, setEventPending] = useState(false);
   const [eventUnavailable, setEventUnavailable] = useState(false);
@@ -62,6 +64,8 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     setRecord(null);
     setAddress("");
     setMessage("");
+    setProgressMessage("");
+    setFeedbackType("status");
     setEventEvidence(null);
     setEventPending(false);
     setEventUnavailable(false);
@@ -94,6 +98,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
 
   async function run(
     action: (current: OrderRecovery | null, op: Operation) => Promise<void>,
+    progress: string,
   ) {
     if (!config.ready || active.current || blocked || loadedKey.current !== key)
       return;
@@ -117,10 +122,15 @@ export function StarterApp({ config }: { config: PublicConfig }) {
         setRecord(r);
       },
       message: (text) => {
-        if (valid()) setMessage(text);
+        if (valid()) {
+          setMessage(text);
+          setFeedbackType("status");
+        }
       },
     };
     setBusy(true);
+    setProgressMessage(progress);
+    setFeedbackType("status");
     setMessage("");
     try {
       if (!navigator.locks)
@@ -150,11 +160,14 @@ export function StarterApp({ config }: { config: PublicConfig }) {
         },
       );
     } catch (error) {
-      op.message(
-        error instanceof Error
-          ? error.message
-          : "Unresolved operation. Keep the original record.",
-      );
+      if (op.valid()) {
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Unresolved operation. Keep the original record.",
+        );
+        setFeedbackType("error");
+      }
     } finally {
       if (active.current === controller) {
         active.current = null;
@@ -177,6 +190,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     if (!op.valid()) return;
     resumed.current.add(`${key}:${current.prepared.txHash}`);
     op.message(CONFIRMATION_PENDING);
+    setProgressMessage(CONFIRMATION_PENDING);
     setConfirming(true);
     const outcome = await confirmOriginal({
       txHash: current.prepared.txHash,
@@ -215,7 +229,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     void run(async (current, op) => {
       if (current?.attempted && current.signedXdr && !terminal(current))
         await checkOriginal(current, op);
-    });
+    }, "Checking the original transaction after reload…");
   }, [key, blocked, busy, record]);
 
   async function prepare(current: OrderRecovery | null, op: Operation) {
@@ -375,7 +389,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
     );
   }
   return (
-    <main>
+    <main className="payproof-app" data-testid="payproof-app">
       <header>
         <h1>LikhaPiña PayProof</h1>
         <span className="chip" data-testid="network-chip">
@@ -384,8 +398,8 @@ export function StarterApp({ config }: { config: PublicConfig }) {
         <span className="chip">HACKATHON DEMO</span>
       </header>
       <p>
-        A blockchain-verifiable payment demo for the LikhaPiña Aklan piña B2B
-        sourcing platform. The new simulated order below is fixed at 1 XLM on
+        A payment-status demo for the LikhaPiña Aklan piña B2B sourcing
+        platform. The new simulated order below is fixed at 1 XLM on
         Stellar Testnet. No real buyer, producer, goods or money participate;
         nothing is fulfilled.
       </p>
@@ -462,20 +476,28 @@ export function StarterApp({ config }: { config: PublicConfig }) {
             run(async (_current, op) => {
               await browserRequest("/api/integration", undefined, op.signal);
               const address = await connectWallet();
-              if (op.valid()) setAddress(address);
-            })
+              if (op.valid()) {
+                setAddress(address);
+                op.message("Freighter connected. Selected public address is shown below.");
+              }
+            }, "Checking integration and waiting for Freighter access…")
           }
         >
           Connect Freighter
         </button>
-        <p>Wallet: {address || "Not connected"}</p>
+        <p className="payproof-wallet" data-testid="wallet-state">
+          Wallet: {address ? "Connected to Freighter" : "Not connected"}
+        </p>
+        {address && (
+          <p className="payproof-long-value">Selected public address: <code>{address}</code></p>
+        )}
         <p>
           Payment: 1 testnet XLM plus network fees. Review the full transaction
           in Freighter.
         </p>
         <button
           disabled={busy || blocked || !address || !!record}
-          onClick={() => run(prepare)}
+          onClick={() => run(prepare, "Preparing a 1 XLM Testnet payment…")}
         >
           Prepare 1 XLM payment
         </button>
@@ -492,7 +514,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
             terminal(record) ||
             blocked
           }
-          onClick={() => run(sign)}
+          onClick={() => run(sign, "Waiting for Freighter to authorize the original transaction…")}
         >
           Sign original transaction
         </button>{" "}
@@ -503,7 +525,7 @@ export function StarterApp({ config }: { config: PublicConfig }) {
             (!!record && terminal(record)) ||
             blocked
           }
-          onClick={() => run(submit)}
+          onClick={() => run(submit, "Submitting the saved transaction envelope…")}
         >
           {record?.attempted
             ? "Retry exact saved envelope"
@@ -530,6 +552,9 @@ export function StarterApp({ config }: { config: PublicConfig }) {
               Original transaction: <code>{record.prepared.txHash}</code>
             </p>
             <p>Preparation expires: {record.prepared.expiresAt}</p>
+            <p>Preparation: Saved</p>
+            <p>Wallet authorization: {record.signedXdr ? "Signed envelope saved" : "Not signed"}</p>
+            <p>Submission evidence: {record.attempted ? "Submission attempt recorded; network outcome is determined by status lookup" : "No submission attempt recorded"}</p>
             <p>Status: {record.status || "Not checked"}</p>
           </>
         )}
@@ -574,16 +599,14 @@ export function StarterApp({ config }: { config: PublicConfig }) {
           )}
         </section>
         {record?.status === "SUCCESS" && (
-          <section data-testid="payment-receipt" aria-label="Payment receipt">
-            <h3>Payment receipt</h3>
+          <section data-testid="payment-receipt" aria-label="Transaction confirmation">
+            <h3>Transaction confirmation</h3>
             <p>
-              {NEW_DEMO_ORDER.productName} (
-              <code>{NEW_DEMO_ORDER.orderReference}</code>):{" "}
-              {fromStroops(NEW_DEMO_ORDER.amount)} XLM paid on Stellar Testnet by the
-              connected demo wallet.
+              Paiflow reported the original {fromStroops(NEW_DEMO_ORDER.amount)} XLM transaction for {NEW_DEMO_ORDER.productName} (
+              <code>{NEW_DEMO_ORDER.orderReference}</code>) as SUCCESS on Stellar Testnet.
             </p>
             <p>
-              Verified transaction:{" "}
+              Original transaction hash:{" "}
               <code className="address">{record.prepared.txHash}</code>
             </p>
             <p>
@@ -596,27 +619,27 @@ export function StarterApp({ config }: { config: PublicConfig }) {
               </a>
             </p>
             <p>
-              This receipt appears only after the original transaction reached
-              SUCCESS on testnet. It does not verify the expected 90/10 split,
-              downstream payouts, or fulfil an application order.
+              This confirms transaction status only. It does not prove that the
+              expected 90/10 split or recipient payouts occurred, and it does not
+              verify or fulfil an application order.
             </p>
           </section>
         )}
         <button
           disabled={busy || !record || blocked}
-          onClick={() => run(status)}
+          onClick={() => run(status, "Checking the original transaction status…")}
         >
           Check original transaction
         </button>{" "}
         <button
           disabled={busy || !record || blocked}
-          onClick={() => run(checkEvents)}
+          onClick={() => run(checkEvents, "Reading events for the original transaction…")}
         >
           Read original transaction events
         </button>{" "}
         <button
           disabled={busy || !record || !terminal(record) || blocked}
-          onClick={() => run(clear)}
+          onClick={() => run(clear, "Acknowledging the final status of this saved record…")}
         >
           Acknowledge final result and clear
         </button>
@@ -626,8 +649,15 @@ export function StarterApp({ config }: { config: PublicConfig }) {
           Transaction confirmation alone is not application payment verification.
         </p>
       </section>
-      <p role="status" aria-live="polite">
-        {confirming ? message : busy ? "Working…" : message}
+      <p
+        className="payproof-feedback"
+        data-error={feedbackType === "error" && !busy ? "true" : "false"}
+        role={busy || feedbackType !== "error" ? "status" : "alert"}
+        aria-live={feedbackType === "error" && !busy ? "assertive" : "polite"}
+        aria-atomic="true"
+        data-testid="payproof-feedback"
+      >
+        {busy ? progressMessage : message}
       </p>
       {confirming && (
         <button
